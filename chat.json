@@ -1,8 +1,18 @@
 {
-  "messages": [],
+  "messages": [
+    {
+      "id": "f3b92f9847a79-19c921018e9",
+      "user": "system",
+      "text": "👋 Amaan joined",
+      "time": "2026-02-24T23:50:54.441Z",
+      "reactions": {}
+    }
+  ],
   "locked": false,
   "announcement": "",
   "audit": [],
   "typing": {},
-  "online": {}
+  "online": {
+    "Amaan": 1771977054440
+  }
 }
