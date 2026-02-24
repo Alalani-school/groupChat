@@ -87,26 +87,9 @@
 </div>
 
 <script>
-/* ========= "SECURITY" THEATER (won't stop real attackers) ========= */
-(function antiInspect(){
-  const forbidden = [123, 73, 74, 67, 85]; // F12, I, J, C, U
-  document.onkeydown = (e) => {
-    const key = e.keyCode;
-    if (forbidden.includes(key) && (e.ctrlKey || e.shiftKey || key === 123)) {
-      sec(`Blocked DevTools shortcut (${key})`);
-      return false;
-    }
-  };
-  let devtoolsOpen=false, threshold=160;
-  setInterval(()=> {
-    const w = window.outerWidth - window.innerWidth > threshold;
-    const h = window.outerHeight - window.innerHeight > threshold;
-    if ((w||h) && !devtoolsOpen) { devtoolsOpen=true; sec("DevTools window detected"); }
-    if (!(w||h)) devtoolsOpen=false;
-  }, 2000);
-})();
+const TYPING_TTL = 3000;
+const ONLINE_TTL = 5000;
 
-/* ========= CONFIG ========= */
 const p1="ghp_";
 const p2="bbqUe5K7A60ohiruHcby";
 const p3="p4s0zy65Zt0iHYJ4";
@@ -115,319 +98,208 @@ const CONFIG = {
   token: p1+p2+p3,
   repo: "alalani-school/groupChat",
   path: "chat.json",
-  pollMs: 1000, // "live" updates
+  pollMs: 1000,
   maxMessages: 250,
   cooldownMs: 900,
   maxLen: 240,
-  ADMIN_USERS: ["admin", "Amaan"] // edit this
+  ADMIN_USERS: ["admin","Amaan"],
+  reactions: ["👍","😂","🔥","💀","👀"]
 };
 
 let DB=null, sha="", me=null, isBusy=false, lastSend=0;
-let queue = Promise.resolve();
-let lastSeenMsgId = null;
+let queue=Promise.resolve();
 
-/* ========= UTIL ========= */
-function $(id){ return document.getElementById(id); }
+function $(id){return document.getElementById(id);}
+function sanitizeName(s){return (s||"").trim().slice(0,18).replace(/[^\w\-]/g,"");}
+function now(){return Date.now();}
+function nowISO(){return new Date().toISOString();}
+function uid(){return Math.random().toString(16).slice(2)+"-"+Date.now().toString(16);}
+function isAdmin(){return me && CONFIG.ADMIN_USERS.includes(me.name);}
 
-function sanitizeName(s){
-  // allow letters/numbers/underscore/dash, trim, clamp
-  s = (s||"").trim().slice(0,18);
-  s = s.replace(/[^\w\-]/g, "");
-  if (!s) return "";
-  return s;
-}
-
-function nowISO(){ return new Date().toISOString(); }
-function fmtTime(iso){
-  const d = new Date(iso);
-  return d.toLocaleString(undefined, {hour:"2-digit", minute:"2-digit", second:"2-digit"}) + " · " +
-         d.toLocaleDateString(undefined, {year:"numeric", month:"short", day:"2-digit"});
-}
-
-function uid(){
-  // not crypto-secure, just unique-ish
-  return Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
-}
-
-function sec(msg){
-  const box = $("secLog");
-  const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
-  box.textContent = (line + box.textContent).slice(0, 4000);
-}
-
-/* ========= GITHUB IO ========= */
 async function ghGet(){
-  const res = await fetch(`https://api.github.com/repos/${CONFIG.repo}/contents/${CONFIG.path}?t=${Date.now()}`, {
-    headers: { Authorization: `Bearer ${CONFIG.token}` }
-  });
-  if (!res.ok) throw new Error("GET failed");
-  const data = await res.json();
-  sha = data.sha;
-  // chat.json is plain utf-8 json; atob is fine
-  const json = JSON.parse(atob((data.content||"").replace(/\s/g,"")));
-  return json;
+  const r=await fetch(`https://api.github.com/repos/${CONFIG.repo}/contents/${CONFIG.path}?t=${Date.now()}`,{headers:{Authorization:`Bearer ${CONFIG.token}`}});
+  const d=await r.json();
+  sha=d.sha;
+  return JSON.parse(atob(d.content.replace(/\s/g,"")));
 }
-
 async function ghPut(db){
-  const content = btoa(unescape(encodeURIComponent(JSON.stringify(db, null, 2))));
-  const res = await fetch(`https://api.github.com/repos/${CONFIG.repo}/contents/${CONFIG.path}`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${CONFIG.token}`, "Content-Type":"application/json" },
-    body: JSON.stringify({ message: "chat update", content, sha })
+  const content=btoa(unescape(encodeURIComponent(JSON.stringify(db,null,2))));
+  await fetch(`https://api.github.com/repos/${CONFIG.repo}/contents/${CONFIG.path}`,{
+    method:"PUT",
+    headers:{Authorization:`Bearer ${CONFIG.token}`,"Content-Type":"application/json"},
+    body:JSON.stringify({message:"update",content,sha})
   });
-  if (res.status === 409) throw new Error("CONFLICT");
-  if (!res.ok) throw new Error("PUT failed");
-  return true;
 }
 
 async function sync(){
-  try{
-    $("livePill").textContent = "syncing…";
-    $("livePill").className = "pill";
-    DB = await ghGet();
-    normalizeDB();
-    renderAll();
-    $("livePill").textContent = "live";
-    $("livePill").className = "pill ok";
-  }catch(e){
-    $("livePill").textContent = "offline";
-    $("livePill").className = "pill bad";
-  }
+  DB=await ghGet();
+  normalize();
+  render();
 }
 
 function push(){
-  return queue = queue.then(async () => {
-    isBusy=true; uiState();
-    try{
-      await ghPut(DB);
-      await sync();
-    }catch(e){
-      if (String(e.message).includes("CONFLICT")){
-        await sync(); // get latest
-        // caller should have already mutated DB; re-try once
-        await ghPut(DB);
-        await sync();
-      } else {
-        sec("Push failed: " + e.message);
-      }
-    } finally {
-      isBusy=false; uiState();
-    }
+  return queue=queue.then(async()=>{
+    await ghPut(DB);
+    await sync();
   });
 }
 
-/* ========= DB SHAPE ========= */
-function normalizeDB(){
-  if (!DB || typeof DB !== "object") DB = {};
-  if (!Array.isArray(DB.messages)) DB.messages = [];
-  if (typeof DB.locked !== "boolean") DB.locked = false;
-  if (typeof DB.announcement !== "string") DB.announcement = "";
-  if (!Array.isArray(DB.audit)) DB.audit = [];
-  DB.messages = DB.messages.slice(-CONFIG.maxMessages);
-  DB.audit = DB.audit.slice(-200);
+function normalize(){
+  DB.messages ||= [];
+  DB.online ||= {};
+  DB.typing ||= {};
+  DB.audit ||= [];
+  DB.messages=DB.messages.slice(-CONFIG.maxMessages);
 }
 
-/* ========= RENDER (NO HTML INJECTION) ========= */
-function renderAll(){
-  // announcement
-  const ann = $("announcement");
-  if (DB.announcement && DB.announcement.trim()){
-    ann.style.display = "block";
-    ann.textContent = DB.announcement;
-  } else {
-    ann.style.display = "none";
-    ann.textContent = "";
+function render(){
+  // online cleanup
+  for(const u in DB.online){
+    if(now()-DB.online[u]>ONLINE_TTL) delete DB.online[u];
   }
 
-  // lock pill
-  $("lockPill").style.display = DB.locked ? "inline-block" : "none";
+  // online list
+  const onlineUsers=Object.keys(DB.online);
+  $("whoami").textContent=me?`👤 ${me.name}${isAdmin()?" (admin)":""}`:"not joined";
+  $("announcement").style.display=DB.announcement?"block":"none";
+  $("announcement").textContent=DB.announcement||"";
 
-  // chat list
-  const chat = $("chat");
-  const atBottom = Math.abs(chat.scrollHeight - chat.scrollTop - chat.clientHeight) < 20;
+  const onlineBox=document.getElementById("onlineList");
+  onlineBox.textContent=onlineUsers.length
+    ? "🟢 Online: "+onlineUsers.join(", ")
+    : "Nobody online";
 
-  chat.textContent = ""; // wipe safely
+  // messages
+  const chat=$("chat");
+  chat.textContent="";
+  for(const m of DB.messages){
+    const row=document.createElement("div");
+    row.className="msg";
 
-  for (const m of DB.messages){
-    const row = document.createElement("div");
-    row.className = "msg" + (m.type==="sys" ? " sys" : "");
-    row.dataset.id = m.id;
+    const meta=document.createElement("div");
+    meta.className="meta";
+    meta.textContent=`${m.user}\n${new Date(m.time).toLocaleTimeString()}`;
 
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${m.user || "system"}\n${fmtTime(m.time)}`;
-
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    bubble.textContent = m.text || "";
+    const bubble=document.createElement("div");
+    bubble.className="bubble";
+    bubble.textContent=m.text;
 
     row.appendChild(meta);
     row.appendChild(bubble);
 
-    // admin delete
-    if (isAdmin()){
-      const del = document.createElement("button");
-      del.className = "danger";
-      del.textContent = "🗑️";
-      del.style.width = "44px";
-      del.style.flex = "0 0 auto";
-      del.onclick = () => deleteMessage(m.id);
-      row.appendChild(del);
-    }
+    // reactions
+    const reactBox=document.createElement("div");
+    CONFIG.reactions.forEach(r=>{
+      const btn=document.createElement("button");
+      btn.textContent=r+(m.reactions?.[r]?` ${m.reactions[r].length}`:"");
+      btn.onclick=()=>toggleReaction(m.id,r);
+      btn.className="secondary";
+      btn.style.fontSize="12px";
+      reactBox.appendChild(btn);
+    });
+    row.appendChild(reactBox);
 
     chat.appendChild(row);
   }
-
-  // auto-scroll when new stuff
-  const newest = DB.messages[DB.messages.length-1];
-  if (newest && newest.id !== lastSeenMsgId){
-    lastSeenMsgId = newest.id;
-    if (atBottom) chat.scrollTop = chat.scrollHeight;
-  }
-
-  // admin panel
-  $("adminPanel").style.display = isAdmin() ? "block" : "none";
-  $("lockBtn").textContent = DB.locked ? "Unlock Chat" : "Lock Chat";
-
-  uiState();
-}
-
-function uiState(){
-  const joined = !!me;
-  const locked = !!DB?.locked;
-  const canSend = joined && !isBusy && (!locked || isAdmin());
-  $("message").disabled = !canSend;
-  $("sendBtn").disabled = !canSend;
-  $("joinBtn").disabled = joined || isBusy;
-  $("leaveBtn").disabled = !joined || isBusy;
-
-  $("whoami").textContent = me
-    ? `👤 ${me.name}${isAdmin() ? " (admin)" : ""}`
-    : "not joined";
-}
-
-/* ========= CHAT ACTIONS ========= */
-function isAdmin(){
-  if (!me) return false;
-  return CONFIG.ADMIN_USERS.includes(me.name);
-}
-
-function audit(line){
-  DB.audit.push({ time: nowISO(), line });
-}
-
-function addMsg({user, text, type="msg"}){
-  const msg = {
-    id: uid(),
-    user: user || "system",
-    text: String(text || "").slice(0, CONFIG.maxLen),
-    type,
-    time: nowISO()
-  };
-  DB.messages.push(msg);
-  DB.messages = DB.messages.slice(-CONFIG.maxMessages);
 }
 
 function joinChat(){
-  const raw = $("username").value;
-  const name = sanitizeName(raw);
-  if (!name) return alert("Pick a username (letters/numbers/_/-).");
-  me = { name };
-  localStorage.setItem("chat_username", name);
-  sec(`Joined as ${name}`);
-  // join message
-  addMsg({ user: "system", text: `👋 ${name} joined`, type:"sys" });
-  audit(`${name} joined`);
-  uiState();
+  const name=sanitizeName($("username").value);
+  if(!name)return alert("Username required.");
+  me={name};
+  localStorage.setItem("chat_username",name);
+  DB.online[name]=now();
+  addMsg("system",`👋 ${name} joined`);
   push();
 }
 
 function leaveChat(){
-  if (!me) return;
-  const name = me.name;
-  me = null;
-  sec(`Left (${name})`);
-  addMsg({ user:"system", text:`👋 ${name} left`, type:"sys" });
-  audit(`${name} left`);
-  uiState();
+  if(!me)return;
+  delete DB.online[me.name];
+  addMsg("system",`👋 ${me.name} left`);
+  me=null;
   push();
 }
 
-async function sendMessage(){
-  if (!me) return;
-  const locked = !!DB.locked;
-  if (locked && !isAdmin()) return alert("Chat is locked.");
+function heartbeat(){
+  if(me){
+    DB.online[me.name]=now();
+    push();
+  }
+}
 
-  const now = Date.now();
-  if (now - lastSend < CONFIG.cooldownMs){
-    $("cooldownHint").textContent = `Cooldown… ${(CONFIG.cooldownMs - (now-lastSend))}ms`;
+function addMsg(user,text){
+  DB.messages.push({id:uid(),user,text,time:nowISO(),reactions:{}});
+}
+
+async function sendMessage(){
+  if(!me)return;
+  let text=$("message").value.trim();
+  if(!text)return;
+
+  if(text.startsWith("/")){
+    handleSlash(text);
+    $("message").value="";
     return;
   }
 
-  let text = ($("message").value || "").trim();
-  if (!text) return;
-
-  // hard block weird invisible spam + clamp
-  text = text.replace(/\u0000/g, "").slice(0, CONFIG.maxLen);
-
-  // NO HTML injection: we store plain text; render uses textContent
-  addMsg({ user: me.name, text, type:"msg" });
-  audit(`${me.name}: ${text.slice(0,40)}`);
-
-  $("message").value = "";
-  $("cooldownHint").textContent = "";
-  lastSend = now;
-
+  addMsg(me.name,text);
+  $("message").value="";
   await push();
 }
 
-/* ========= ADMIN ========= */
-async function deleteMessage(id){
-  if (!isAdmin()) return;
-  DB.messages = DB.messages.filter(m => m.id !== id);
-  audit(`ADMIN ${me.name} deleted message ${id}`);
-  sec(`Admin deleted message ${id}`);
-  await push();
+function handleSlash(cmd){
+  const parts=cmd.split(" ");
+  const base=parts[0];
+
+  if(base==="/lock" && isAdmin()){DB.locked=true;addMsg("system","🔒 Chat locked");}
+  else if(base==="/unlock" && isAdmin()){DB.locked=false;addMsg("system","🔓 Chat unlocked");}
+  else if(base==="/purge" && isAdmin()){DB.messages=[];}
+  else if(base==="/ann" && isAdmin()){DB.announcement=parts.slice(1).join(" ");}
+  else if(base==="/kick" && isAdmin()){
+    const target=parts[1];
+    delete DB.online[target];
+    addMsg("system",`👢 ${target} kicked`);
+  }
+  push();
 }
 
-async function setAnnouncement(){
-  if (!isAdmin()) return;
-  DB.announcement = ($("admAnn").value || "").trim().slice(0,200);
-  audit(`ADMIN ${me.name} set announcement`);
-  await push();
+function toggleReaction(id,emoji){
+  if(!me)return;
+  const m=DB.messages.find(x=>x.id===id);
+  if(!m)return;
+  m.reactions ||= {};
+  m.reactions[emoji] ||= [];
+  const i=m.reactions[emoji].indexOf(me.name);
+  if(i>=0)m.reactions[emoji].splice(i,1);
+  else m.reactions[emoji].push(me.name);
+  push();
 }
 
-async function clearAnnouncement(){
-  if (!isAdmin()) return;
-  DB.announcement = "";
-  audit(`ADMIN ${me.name} cleared announcement`);
-  await push();
+// typing indicator
+$("message").addEventListener("input",()=>{
+  if(me) DB.typing[me.name]=now();
+});
+
+function renderTyping(){
+  const active=Object.entries(DB.typing||{})
+    .filter(([u,t])=>now()-t<TYPING_TTL && u!==me?.name)
+    .map(([u])=>u);
+  $("typingIndicator").textContent=
+    active.length?active.join(", ")+" typing...":"";
 }
 
-async function toggleLock(){
-  if (!isAdmin()) return;
-  DB.locked = !DB.locked;
-  addMsg({ user:"system", text: DB.locked ? "🔒 Chat locked by admin" : "🔓 Chat unlocked by admin", type:"sys" });
-  audit(`ADMIN ${me.name} lock=${DB.locked}`);
-  await push();
-}
+setInterval(async()=>{
+  await sync();
+  renderTyping();
+},CONFIG.pollMs);
 
-async function purgeChat(){
-  if (!isAdmin()) return;
-  if (!confirm("Purge all messages?")) return;
-  DB.messages = [];
-  addMsg({ user:"system", text:"🧹 Messages purged by admin", type:"sys" });
-  audit(`ADMIN ${me.name} purged messages`);
-  await push();
-}
+setInterval(heartbeat,3000);
 
-/* ========= BOOT ========= */
 (function boot(){
-  const saved = localStorage.getItem("chat_username") || "";
-  $("username").value = saved;
+  const saved=localStorage.getItem("chat_username")||"";
+  $("username").value=saved;
   sync();
-  setInterval(sync, CONFIG.pollMs);
-  uiState();
 })();
 </script>
 </body>
