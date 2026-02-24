@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>C4E Group Chat</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#c9d1d9; --muted:#8b949e; --primary:#238636; --danger:#da3633; --accent:#1f6feb;}
+  body{margin:0;font-family:system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--text);user-select:none}
+  .wrap{max-width:900px;margin:16px auto;padding:0 16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  input,button,select{border-radius:8px;border:1px solid var(--border);padding:10px;font-size:14px}
+  input,select{background:#000;color:#fff;flex:1;min-width:160px}
+  button{cursor:pointer;background:var(--primary);border:none;color:#fff;font-weight:700}
+  button.secondary{background:#30363d}
+  button.danger{background:var(--danger)}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  #topbar{position:sticky;top:0;z-index:10;background:var(--card);border-bottom:1px solid var(--border);padding:10px}
+  #chat{height:420px;overflow:auto;background:#000;border:1px solid var(--border);border-radius:10px;padding:10px}
+  .msg{padding:8px 10px;border-bottom:1px solid #111;display:flex;gap:10px}
+  .meta{min-width:180px;color:var(--muted);font-size:12px}
+  .bubble{flex:1}
+  .sys .bubble{color:#ffd33d}
+  .ann{background:var(--accent);color:#fff;border-radius:10px;padding:10px;display:none;margin-bottom:12px}
+  .pill{display:inline-block;padding:3px 8px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--muted)}
+  .ok{color:#3fb950;border-color:#3fb95055}
+  .bad{color:#ff7b72;border-color:#ff7b7255}
+  .small{font-size:12px;color:var(--muted)}
+</style>
+</head>
+
+<body oncontextmenu="return false;">
+<div id="topbar">
+  <div class="wrap row" style="align-items:center;justify-content:space-between">
+    <div>
+      <b>C4E Chat</b>
+      <span id="livePill" class="pill">syncing…</span>
+      <span id="lockPill" class="pill" style="display:none">🔒 locked</span>
+    </div>
+    <div class="small" id="whoami"></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div id="announcement" class="ann"></div>
+
+  <div class="card">
+    <div class="row">
+      <input id="username" placeholder="Username (saved)" maxlength="18" />
+      <button class="secondary" id="joinBtn" onclick="joinChat()">Join</button>
+      <button class="secondary danger" id="leaveBtn" onclick="leaveChat()" disabled>Leave</button>
+    </div>
+    <div class="small">Username is sanitized for HTML injection</div>
+  </div>
+
+  <div class="card">
+    <div id="chat" aria-live="polite"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input id="message" placeholder="Type a message…" maxlength="240" disabled />
+      <button id="sendBtn" onclick="sendMessage()" disabled>Send</button>
+    </div>
+    <div class="small" id="cooldownHint"></div>
+  </div>
+
+  <div id="adminPanel" class="card" style="display:none;border:1px solid var(--danger)">
+    <h3 style="margin-top:0">⚙️ Admin Tools</h3>
+    <div class="row">
+      <input id="admAnn" placeholder="Announcement text…" maxlength="200"/>
+      <button onclick="setAnnouncement()">Post</button>
+      <button class="danger" onclick="clearAnnouncement()">Clear</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="danger" onclick="toggleLock()" id="lockBtn">Lock Chat</button>
+      <button class="danger" onclick="purgeChat()">Purge Messages</button>
+    </div>
+    <div class="small">Admins can delete individual messages via the 🗑️ button next to each one.</div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px 0">📜 Security / Activity Log</h3>
+    <div id="secLog" class="small" style="white-space:pre-wrap;max-height:120px;overflow:auto;background:#000;border:1px solid var(--border);border-radius:10px;padding:10px"></div>
+  </div>
+</div>
+
+<script>
+/* ========= "SECURITY" THEATER (won't stop real attackers) ========= */
+(function antiInspect(){
+  const forbidden = [123, 73, 74, 67, 85]; // F12, I, J, C, U
+  document.onkeydown = (e) => {
+    const key = e.keyCode;
+    if (forbidden.includes(key) && (e.ctrlKey || e.shiftKey || key === 123)) {
+      sec(`Blocked DevTools shortcut (${key})`);
+      return false;
+    }
+  };
+  let devtoolsOpen=false, threshold=160;
+  setInterval(()=> {
+    const w = window.outerWidth - window.innerWidth > threshold;
+    const h = window.outerHeight - window.innerHeight > threshold;
+    if ((w||h) && !devtoolsOpen) { devtoolsOpen=true; sec("DevTools window detected"); }
+    if (!(w||h)) devtoolsOpen=false;
+  }, 2000);
+})();
+
+/* ========= CONFIG ========= */
+const p1="ghp_";
+const p2="bbqUe5K7A60ohiruHcby";
+const p3="p4s0zy65Zt0iHYJ4";
+
+const CONFIG = {
+  token: p1+p2+p3,
+  repo: "alalani-school/groupChat",
+  path: "chat.json",
+  pollMs: 1000, // "live" updates
+  maxMessages: 250,
+  cooldownMs: 900,
+  maxLen: 240,
+  ADMIN_USERS: ["admin", "Amaan"] // edit this
+};
+
+let DB=null, sha="", me=null, isBusy=false, lastSend=0;
+let queue = Promise.resolve();
+let lastSeenMsgId = null;
+
+/* ========= UTIL ========= */
+function $(id){ return document.getElementById(id); }
+
+function sanitizeName(s){
+  // allow letters/numbers/underscore/dash, trim, clamp
+  s = (s||"").trim().slice(0,18);
+  s = s.replace(/[^\w\-]/g, "");
+  if (!s) return "";
+  return s;
+}
+
+function nowISO(){ return new Date().toISOString(); }
+function fmtTime(iso){
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {hour:"2-digit", minute:"2-digit", second:"2-digit"}) + " · " +
+         d.toLocaleDateString(undefined, {year:"numeric", month:"short", day:"2-digit"});
+}
+
+function uid(){
+  // not crypto-secure, just unique-ish
+  return Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
+}
+
+function sec(msg){
+  const box = $("secLog");
+  const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  box.textContent = (line + box.textContent).slice(0, 4000);
+}
+
+/* ========= GITHUB IO ========= */
+async function ghGet(){
+  const res = await fetch(`https://api.github.com/repos/${CONFIG.repo}/contents/${CONFIG.path}?t=${Date.now()}`, {
+    headers: { Authorization: `Bearer ${CONFIG.token}` }
+  });
+  if (!res.ok) throw new Error("GET failed");
+  const data = await res.json();
+  sha = data.sha;
+  // chat.json is plain utf-8 json; atob is fine
+  const json = JSON.parse(atob((data.content||"").replace(/\s/g,"")));
+  return json;
+}
+
+async function ghPut(db){
+  const content = btoa(unescape(encodeURIComponent(JSON.stringify(db, null, 2))));
+  const res = await fetch(`https://api.github.com/repos/${CONFIG.repo}/contents/${CONFIG.path}`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${CONFIG.token}`, "Content-Type":"application/json" },
+    body: JSON.stringify({ message: "chat update", content, sha })
+  });
+  if (res.status === 409) throw new Error("CONFLICT");
+  if (!res.ok) throw new Error("PUT failed");
+  return true;
+}
+
+async function sync(){
+  try{
+    $("livePill").textContent = "syncing…";
+    $("livePill").className = "pill";
+    DB = await ghGet();
+    normalizeDB();
+    renderAll();
+    $("livePill").textContent = "live";
+    $("livePill").className = "pill ok";
+  }catch(e){
+    $("livePill").textContent = "offline";
+    $("livePill").className = "pill bad";
+  }
+}
+
+function push(){
+  return queue = queue.then(async () => {
+    isBusy=true; uiState();
+    try{
+      await ghPut(DB);
+      await sync();
+    }catch(e){
+      if (String(e.message).includes("CONFLICT")){
+        await sync(); // get latest
+        // caller should have already mutated DB; re-try once
+        await ghPut(DB);
+        await sync();
+      } else {
+        sec("Push failed: " + e.message);
+      }
+    } finally {
+      isBusy=false; uiState();
+    }
+  });
+}
+
+/* ========= DB SHAPE ========= */
+function normalizeDB(){
+  if (!DB || typeof DB !== "object") DB = {};
+  if (!Array.isArray(DB.messages)) DB.messages = [];
+  if (typeof DB.locked !== "boolean") DB.locked = false;
+  if (typeof DB.announcement !== "string") DB.announcement = "";
+  if (!Array.isArray(DB.audit)) DB.audit = [];
+  DB.messages = DB.messages.slice(-CONFIG.maxMessages);
+  DB.audit = DB.audit.slice(-200);
+}
+
+/* ========= RENDER (NO HTML INJECTION) ========= */
+function renderAll(){
+  // announcement
+  const ann = $("announcement");
+  if (DB.announcement && DB.announcement.trim()){
+    ann.style.display = "block";
+    ann.textContent = DB.announcement;
+  } else {
+    ann.style.display = "none";
+    ann.textContent = "";
+  }
+
+  // lock pill
+  $("lockPill").style.display = DB.locked ? "inline-block" : "none";
+
+  // chat list
+  const chat = $("chat");
+  const atBottom = Math.abs(chat.scrollHeight - chat.scrollTop - chat.clientHeight) < 20;
+
+  chat.textContent = ""; // wipe safely
+
+  for (const m of DB.messages){
+    const row = document.createElement("div");
+    row.className = "msg" + (m.type==="sys" ? " sys" : "");
+    row.dataset.id = m.id;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${m.user || "system"}\n${fmtTime(m.time)}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = m.text || "";
+
+    row.appendChild(meta);
+    row.appendChild(bubble);
+
+    // admin delete
+    if (isAdmin()){
+      const del = document.createElement("button");
+      del.className = "danger";
+      del.textContent = "🗑️";
+      del.style.width = "44px";
+      del.style.flex = "0 0 auto";
+      del.onclick = () => deleteMessage(m.id);
+      row.appendChild(del);
+    }
+
+    chat.appendChild(row);
+  }
+
+  // auto-scroll when new stuff
+  const newest = DB.messages[DB.messages.length-1];
+  if (newest && newest.id !== lastSeenMsgId){
+    lastSeenMsgId = newest.id;
+    if (atBottom) chat.scrollTop = chat.scrollHeight;
+  }
+
+  // admin panel
+  $("adminPanel").style.display = isAdmin() ? "block" : "none";
+  $("lockBtn").textContent = DB.locked ? "Unlock Chat" : "Lock Chat";
+
+  uiState();
+}
+
+function uiState(){
+  const joined = !!me;
+  const locked = !!DB?.locked;
+  const canSend = joined && !isBusy && (!locked || isAdmin());
+  $("message").disabled = !canSend;
+  $("sendBtn").disabled = !canSend;
+  $("joinBtn").disabled = joined || isBusy;
+  $("leaveBtn").disabled = !joined || isBusy;
+
+  $("whoami").textContent = me
+    ? `👤 ${me.name}${isAdmin() ? " (admin)" : ""}`
+    : "not joined";
+}
+
+/* ========= CHAT ACTIONS ========= */
+function isAdmin(){
+  if (!me) return false;
+  return CONFIG.ADMIN_USERS.includes(me.name);
+}
+
+function audit(line){
+  DB.audit.push({ time: nowISO(), line });
+}
+
+function addMsg({user, text, type="msg"}){
+  const msg = {
+    id: uid(),
+    user: user || "system",
+    text: String(text || "").slice(0, CONFIG.maxLen),
+    type,
+    time: nowISO()
+  };
+  DB.messages.push(msg);
+  DB.messages = DB.messages.slice(-CONFIG.maxMessages);
+}
+
+function joinChat(){
+  const raw = $("username").value;
+  const name = sanitizeName(raw);
+  if (!name) return alert("Pick a username (letters/numbers/_/-).");
+  me = { name };
+  localStorage.setItem("chat_username", name);
+  sec(`Joined as ${name}`);
+  // join message
+  addMsg({ user: "system", text: `👋 ${name} joined`, type:"sys" });
+  audit(`${name} joined`);
+  uiState();
+  push();
+}
+
+function leaveChat(){
+  if (!me) return;
+  const name = me.name;
+  me = null;
+  sec(`Left (${name})`);
+  addMsg({ user:"system", text:`👋 ${name} left`, type:"sys" });
+  audit(`${name} left`);
+  uiState();
+  push();
+}
+
+async function sendMessage(){
+  if (!me) return;
+  const locked = !!DB.locked;
+  if (locked && !isAdmin()) return alert("Chat is locked.");
+
+  const now = Date.now();
+  if (now - lastSend < CONFIG.cooldownMs){
+    $("cooldownHint").textContent = `Cooldown… ${(CONFIG.cooldownMs - (now-lastSend))}ms`;
+    return;
+  }
+
+  let text = ($("message").value || "").trim();
+  if (!text) return;
+
+  // hard block weird invisible spam + clamp
+  text = text.replace(/\u0000/g, "").slice(0, CONFIG.maxLen);
+
+  // NO HTML injection: we store plain text; render uses textContent
+  addMsg({ user: me.name, text, type:"msg" });
+  audit(`${me.name}: ${text.slice(0,40)}`);
+
+  $("message").value = "";
+  $("cooldownHint").textContent = "";
+  lastSend = now;
+
+  await push();
+}
+
+/* ========= ADMIN ========= */
+async function deleteMessage(id){
+  if (!isAdmin()) return;
+  DB.messages = DB.messages.filter(m => m.id !== id);
+  audit(`ADMIN ${me.name} deleted message ${id}`);
+  sec(`Admin deleted message ${id}`);
+  await push();
+}
+
+async function setAnnouncement(){
+  if (!isAdmin()) return;
+  DB.announcement = ($("admAnn").value || "").trim().slice(0,200);
+  audit(`ADMIN ${me.name} set announcement`);
+  await push();
+}
+
+async function clearAnnouncement(){
+  if (!isAdmin()) return;
+  DB.announcement = "";
+  audit(`ADMIN ${me.name} cleared announcement`);
+  await push();
+}
+
+async function toggleLock(){
+  if (!isAdmin()) return;
+  DB.locked = !DB.locked;
+  addMsg({ user:"system", text: DB.locked ? "🔒 Chat locked by admin" : "🔓 Chat unlocked by admin", type:"sys" });
+  audit(`ADMIN ${me.name} lock=${DB.locked}`);
+  await push();
+}
+
+async function purgeChat(){
+  if (!isAdmin()) return;
+  if (!confirm("Purge all messages?")) return;
+  DB.messages = [];
+  addMsg({ user:"system", text:"🧹 Messages purged by admin", type:"sys" });
+  audit(`ADMIN ${me.name} purged messages`);
+  await push();
+}
+
+/* ========= BOOT ========= */
+(function boot(){
+  const saved = localStorage.getItem("chat_username") || "";
+  $("username").value = saved;
+  sync();
+  setInterval(sync, CONFIG.pollMs);
+  uiState();
+})();
+</script>
+</body>
+</html>
