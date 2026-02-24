@@ -1,3 +1,6 @@
 {
-  "messages": []
+  "messages": [],
+  "locked": false,
+  "announcement": "",
+  "audit": []
 }
