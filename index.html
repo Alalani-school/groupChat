@@ -5,43 +5,22 @@
 <title>C4E Chat</title>
 
 <style>
-body{
-  margin:0;
-  font-family:system-ui;
-  background:#0d1117;
-  color:#c9d1d9;
-}
-.wrap{max-width:900px;margin:20px auto;padding:0 16px}
-.card{
-  background:#161b22;
-  border:1px solid #30363d;
-  border-radius:10px;
-  padding:12px;
-  margin-bottom:12px;
-}
-input,button{
-  padding:8px;
-  border-radius:8px;
-  border:1px solid #30363d;
-}
+body{margin:0;background:#0d1117;color:#c9d1d9;font-family:system-ui}
+.wrap{max-width:950px;margin:20px auto;padding:0 16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:12px;margin-bottom:12px}
+input,button{padding:8px;border-radius:8px;border:1px solid #30363d}
 input{background:#000;color:#fff}
 button{background:#238636;color:#fff;border:none;cursor:pointer}
+button.secondary{background:#30363d}
+button.danger{background:#da3633}
 button:disabled{opacity:.5}
-#chat{
-  height:400px;
-  overflow:auto;
-  background:#000;
-  padding:10px;
-  border-radius:10px;
-}
-.msg{
-  border-bottom:1px solid #111;
-  padding:6px 0;
-}
-.meta{
-  font-size:12px;
-  color:#8b949e;
-}
+#chat{height:420px;overflow:auto;background:#000;border-radius:10px;padding:10px}
+.msg{border-bottom:1px solid #111;padding:6px;display:flex;gap:8px}
+.meta{font-size:12px;color:#8b949e;width:170px}
+.bubble{flex:1}
+.reactions button{font-size:11px;margin-right:4px}
+.admin{border:1px solid #da3633}
+.small{font-size:12px;color:#8b949e}
 </style>
 </head>
 <body>
@@ -52,13 +31,13 @@ button:disabled{opacity:.5}
 <input id="username" placeholder="Username">
 <button onclick="join()">Join</button>
 <button onclick="leave()">Leave</button>
-<div id="online"></div>
+<div id="online" class="small"></div>
 </div>
 
 <div class="card">
 <div id="announcement"></div>
 <div id="chat"></div>
-<div id="typing"></div>
+<div id="typing" class="small"></div>
 </div>
 
 <div class="card">
@@ -66,16 +45,26 @@ button:disabled{opacity:.5}
 <button onclick="send()" id="sendBtn" disabled>Send</button>
 </div>
 
+<div class="card admin" id="adminPanel" style="display:none">
+<h3>Admin Tools</h3>
+<input id="annText" placeholder="Announcement">
+<button onclick="setAnn()">Post</button>
+<button onclick="clearAnn()" class="danger">Clear</button>
+<br><br>
+<button onclick="toggleLock()" class="danger">Toggle Lock</button>
+<button onclick="purge()" class="danger">Purge Messages</button>
+</div>
+
 </div>
 
 <script>
-const g1 = "ghp_"
-const g2 = "bbqUe5K7A60ohiruHcby";
-const g3 = "p4s0zy65Zt0iHYJ4";
-const TOKEN=g1 + g2 + g3;
+const TOKEN="ghp_YOUR_TOKEN";
 const REPO="alalani-school/groupChat";
 const PATH="chat.json";
-const POLL=1500;
+const POLL=1200;
+const ADMIN_USERS=["admin","Amaan"];
+const REACTIONS=["👍","😂","🔥","💀","👀"];
+const MAX_MSG=300;
 
 let DB=null;
 let SHA="";
@@ -86,9 +75,10 @@ function now(){return Date.now()}
 function iso(){return new Date().toISOString()}
 function uid(){return Math.random().toString(16).slice(2)}
 
+function isAdmin(){return me && ADMIN_USERS.includes(me)}
+
 async function getDB(){
-  const r=await fetch(
-    `https://api.github.com/repos/${REPO}/contents/${PATH}?t=${Date.now()}`,
+  const r=await fetch(`https://api.github.com/repos/${REPO}/contents/${PATH}?t=${Date.now()}`,
     {headers:{Authorization:`Bearer ${TOKEN}`}}
   );
   const d=await r.json();
@@ -96,11 +86,10 @@ async function getDB(){
   return JSON.parse(atob(d.content));
 }
 
-async function saveDB(){
-  const content=btoa(JSON.stringify(DB,null,2));
-  await fetch(
-    `https://api.github.com/repos/${REPO}/contents/${PATH}`,
-    {
+async function saveDB(retry=true){
+  try{
+    const content=btoa(JSON.stringify(DB,null,2));
+    const r=await fetch(`https://api.github.com/repos/${REPO}/contents/${PATH}`,{
       method:"PUT",
       headers:{
         Authorization:`Bearer ${TOKEN}`,
@@ -111,44 +100,16 @@ async function saveDB(){
         content,
         sha:SHA
       })
+    });
+
+    if(r.status===409 && retry){
+      await sync();
+      return saveDB(false);
     }
-  );
-}
 
-function render(){
-  if(!DB) return;
-
-  // online cleanup
-  for(const u in DB.online){
-    if(now()-DB.online[u]>5000) delete DB.online[u];
+  }catch(e){
+    console.log("save error",e);
   }
-
-  $("online").textContent =
-    "Online: " + Object.keys(DB.online).join(", ");
-
-  $("announcement").textContent = DB.announcement || "";
-
-  const chat=$("chat");
-  chat.innerHTML="";
-  DB.messages.forEach(m=>{
-    const div=document.createElement("div");
-    div.className="msg";
-    div.innerHTML=`
-      <div class="meta">${m.user} — ${new Date(m.time).toLocaleTimeString()}</div>
-      <div>${m.text}</div>
-    `;
-    chat.appendChild(div);
-  });
-
-  // typing
-  const typingUsers=Object.entries(DB.typing)
-    .filter(([u,t])=>now()-t<3000 && u!==me)
-    .map(([u])=>u);
-
-  $("typing").textContent =
-    typingUsers.length
-      ? typingUsers.join(", ")+" typing..."
-      : "";
 }
 
 async function sync(){
@@ -161,44 +122,90 @@ async function push(){
   await sync();
 }
 
+function render(){
+  if(!DB) return;
+
+  // cleanup online
+  for(const u in DB.online)
+    if(now()-DB.online[u]>5000) delete DB.online[u];
+
+  $("online").textContent="Online: "+Object.keys(DB.online).join(", ");
+  $("announcement").textContent=DB.announcement||"";
+
+  const chat=$("chat");
+  chat.innerHTML="";
+
+  DB.messages.slice(-MAX_MSG).forEach(m=>{
+    const row=document.createElement("div");
+    row.className="msg";
+
+    const meta=document.createElement("div");
+    meta.className="meta";
+    meta.innerText=m.user+"\n"+new Date(m.time).toLocaleTimeString();
+
+    const bubble=document.createElement("div");
+    bubble.className="bubble";
+    bubble.innerText=m.text;
+
+    const react=document.createElement("div");
+    react.className="reactions";
+
+    REACTIONS.forEach(r=>{
+      const btn=document.createElement("button");
+      const count=m.reactions?.[r]?.length||0;
+      btn.textContent=r+(count?(" "+count):"");
+      btn.className="secondary";
+      btn.onclick=()=>toggleReaction(m.id,r);
+      react.appendChild(btn);
+    });
+
+    if(isAdmin()){
+      const del=document.createElement("button");
+      del.textContent="🗑";
+      del.className="danger";
+      del.onclick=()=>deleteMsg(m.id);
+      react.appendChild(del);
+    }
+
+    row.appendChild(meta);
+    row.appendChild(bubble);
+    row.appendChild(react);
+    chat.appendChild(row);
+  });
+
+  const typingUsers=Object.entries(DB.typing||{})
+    .filter(([u,t])=>now()-t<3000 && u!==me)
+    .map(([u])=>u);
+
+  $("typing").textContent=
+    typingUsers.length?typingUsers.join(", ")+" typing...":"";
+
+  $("message").disabled=!me || DB.locked;
+  $("sendBtn").disabled=!me || DB.locked;
+
+  $("adminPanel").style.display=isAdmin()?"block":"none";
+}
+
 async function join(){
   const name=$("username").value.trim();
-  if(!name) return alert("Username required");
+  if(!name) return;
 
   me=name;
   DB.online[name]=now();
-  DB.messages.push({
-    id:uid(),
-    user:"system",
-    text:name+" joined",
-    time:iso()
-  });
-
-  $("message").disabled=false;
-  $("sendBtn").disabled=false;
-
+  DB.messages.push({id:uid(),user:"system",text:name+" joined",time:iso(),reactions:{}});
   await push();
 }
 
 async function leave(){
   if(!me) return;
   delete DB.online[me];
-  DB.messages.push({
-    id:uid(),
-    user:"system",
-    text:me+" left",
-    time:iso()
-  });
+  DB.messages.push({id:uid(),user:"system",text:me+" left",time:iso(),reactions:{}});
   me=null;
-  $("message").disabled=true;
-  $("sendBtn").disabled=true;
   await push();
 }
 
 async function send(){
-  if(!me) return;
-  if(DB.locked) return alert("Chat locked");
-
+  if(!me || DB.locked) return;
   const text=$("message").value.trim();
   if(!text) return;
 
@@ -206,16 +213,56 @@ async function send(){
     id:uid(),
     user:me,
     text,
-    time:iso()
+    time:iso(),
+    reactions:{}
   });
 
   $("message").value="";
   await push();
 }
 
-$("message").addEventListener("input",()=>{
+function toggleReaction(id,emoji){
   if(!me) return;
-  DB.typing[me]=now();
+  const m=DB.messages.find(x=>x.id===id);
+  if(!m) return;
+
+  m.reactions ||= {};
+  m.reactions[emoji] ||= [];
+
+  const i=m.reactions[emoji].indexOf(me);
+  if(i>=0) m.reactions[emoji].splice(i,1);
+  else m.reactions[emoji].push(me);
+
+  push();
+}
+
+function deleteMsg(id){
+  DB.messages=DB.messages.filter(m=>m.id!==id);
+  push();
+}
+
+function setAnn(){
+  DB.announcement=$("annText").value;
+  push();
+}
+
+function clearAnn(){
+  DB.announcement="";
+  push();
+}
+
+function toggleLock(){
+  DB.locked=!DB.locked;
+  push();
+}
+
+function purge(){
+  DB.messages=[];
+  push();
+}
+
+$("message").addEventListener("input",()=>{
+  if(me) DB.typing[me]=now();
 });
 
 setInterval(async()=>{
