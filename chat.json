@@ -1,32 +1,7 @@
 {
-  "messages": [
-    {
-      "id": "f3b92f9847a79-19c921018e9",
-      "user": "system",
-      "text": "Ã°ÂÂÂ Amaan joined",
-      "time": "2026-02-24T23:50:54.441Z",
-      "reactions": {}
-    },
-    {
-      "id": "e13d7295032b9-19c921056f0",
-      "user": "system",
-      "text": "ð Amaan joined",
-      "time": "2026-02-24T23:51:10.320Z",
-      "reactions": {}
-    },
-    {
-      "id": "cc1a43d0ded91-19c92107b3f",
-      "user": "system",
-      "text": "👋 Amaan joined",
-      "time": "2026-02-24T23:51:19.615Z",
-      "reactions": {}
-    }
-  ],
-  "locked": false,
-  "announcement": "",
-  "audit": [],
+  "messages": [],
+  "online": {},
   "typing": {},
-  "online": {
-    "Amaan": 1771977079615
-  }
+  "announcement": "",
+  "locked": false
 }
